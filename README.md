@@ -1,113 +1,102 @@
-# ===================readme.ZJJ===========================
-# 1. activate environment  
-conda activate /media/jqzhu/APE/OTHERS/Anaconda/envs/lorasculpt    
-cd LoRASculpt-main
+# LoRASculpt-ResPatch
 
-# 2. Train/fine-tuning  
-bash ./scripts/v1_5/train/ours-train.sh
+Official implementation base of **LoRASculpt** with our extended training pipeline in `LoRASculpt_Trainer.py`.
 
-# 3. Test/val 
-bash ./scripts/v1_5/eval/eval_all.sh
-
-# ===================readme.ZJJ===========================
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# [CVPR'25 Oral] LoRASculpt
-
-This repository is built for the paper [LoRASculpt: Sculpting LoRA for Harmonizing General and Specialized Knowledge in Multimodal Large Language Models](https://arxiv.org/abs/2503.16843).
+> Base paper: **LoRASculpt: Sculpting LoRA for Harmonizing General and Specialized Knowledge in Multimodal Large Language Models** (CVPR 2025 Oral)
+> 
+> Paper: https://arxiv.org/abs/2503.16843
 
 <div align="center">
-<img alt="method" src="images/LoRASculpt.png">
+  <img alt="LoRASculpt Method" src="images/LoRASculpt.png" width="85%">
 </div>
 
-## News
-* [2025-05] Repo created. Code will be released soon.
-* [2025-07] Code released.
+## Highlights
 
+This repository contains our practical training/evaluation workflow and trainer-side extensions for multimodal LoRA tuning, including:
 
-## Preparation
-1. Clone this repository and navigate to LoRASculpt folder:
-    ```bash
-    git clone https://github.com/LiangJian24/LoRASculpt
-    cd LoRASculpt
-    ```
+1. **C1. Risk-aware Rank Pruning**
+2. **C2. Structure-aware Regularization**
+3. **C3. Residual Patch Refinement**
 
-2. Install package:
-    ```Shell
-    conda create -n lorasculpt python=3.10 -y
-    conda activate lorasculpt
-    pip install --upgrade pip
-    pip install -e .
-    ```
+---
 
-3. Install additional packages for training cases:
-    ```
-    pip install -e ".[train]"
-    pip install flash-attn --no-build-isolation
-    ```
+## Quick Start
 
-4. Download the required datasets and place them in the corresponding folder.
+### 1) Environment
 
-
-## Usage
-1. Set the correct paths in the scripts under `./scripts/v1_5`.
-
-2. Run the following training script to train on downstream task:
-    ```bash
-    bash ./scripts/v1_5/train/ours-train.sh
-    ```
-
-3. Run the following script to evaluate upstream and downstream performance:
-   ```bash
-   bash ./scripts/v1_5/eval/eval_all.sh
-   ```
-
-
-## Citation
-If you find LoRASculpt useful for your research and applications, please cite using this BibTeX:
-```bibtex
-@InProceedings{Liang_2025_CVPR,
-    author    = {Liang, Jian and Huang, Wenke and Wan, Guancheng and Yang, Qu and Ye, Mang},
-    title     = {LoRASculpt: Sculpting LoRA for Harmonizing General and Specialized Knowledge in Multimodal Large Language Models},
-    booktitle = {CVPR},
-    year      = {2025}
-}
+```bash
+conda create -n lorasculpt python=3.10 -y
+conda activate lorasculpt
+pip install --upgrade pip
+pip install -e .
+pip install -e ".[train]"
+pip install flash-attn --no-build-isolation
 ```
 
+If you already have a local environment path, you can also use:
+
+```bash
+conda activate /media/jqzhu/APE/OTHERS/Anaconda/envs/lorasculpt
+```
+
+### 2) Training
+
+```bash
+bash ./scripts/v1_5/train/ours-train.sh
+```
+
+### 3) Evaluation
+
+```bash
+bash ./scripts/v1_5/eval/eval_all.sh
+```
+
+---
+
+## Project Structure
+
+```text
+.
+├── llava/train/LoRASculpt_Trainer.py      # Main trainer with our extensions
+├── scripts/v1_5/train/ours-train.sh       # Training entry
+├── scripts/v1_5/eval/eval_all.sh          # Evaluation entry
+├── backup/                                # Backup/ablation trainer variants
+└── images/LoRASculpt.png
+```
+
+---
+
+## Dataset & Paths
+
+Before running, update dataset/model/output paths in scripts under:
+
+- `scripts/v1_5/train/`
+- `scripts/v1_5/eval/`
+
+Make sure all required datasets are downloaded and placed in the expected directories.
+
+---
+
+## Reproducibility Notes
+
+- Training behavior is controlled by shell scripts plus environment variables.
+- Core algorithm logic is in `llava/train/LoRASculpt_Trainer.py`.
+- Ablation and backup versions are provided in `backup/`.
+
+
+---
+
 ## Acknowledgement
-Our repo is built on [LLaVA](https://github.com/haotian-liu/LLaVA). We thank the authors for sharing their code.
 
+This codebase is built upon:
 
-## Related Projects
-Keeping Yourself is Important in Downstream Tuning Multimodal Large Language Model
-[[Paper](https://arxiv.org/abs/2503.04543)][[Project Page](https://github.com/WenkeHuang/Awesome-MLLM-Tuning)]
+- [LLaVA](https://github.com/haotian-liu/LLaVA)
+- [LoRASculpt](https://github.com/LiangJian24/LoRASculpt)
+
+We thank the original authors for their open-source contributions.
+
+---
+
+## License
+
+Please follow the original upstream license terms (and dependencies' licenses) when using this repository.
