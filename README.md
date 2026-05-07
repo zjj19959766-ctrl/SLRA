@@ -2,14 +2,6 @@
 
 Official implementation base of **LoRASculpt** with our extended training pipeline in `LoRASculpt_Trainer.py`.
 
-> Base paper: **LoRASculpt: Sculpting LoRA for Harmonizing General and Specialized Knowledge in Multimodal Large Language Models** (CVPR 2025 Oral)
-> 
-> Paper: https://arxiv.org/abs/2503.16843
-
-<div align="center">
-  <img alt="LoRASculpt Method" src="images/LoRASculpt.png" width="85%">
-</div>
-
 ## Highlights
 
 This repository contains our practical training/evaluation workflow and trainer-side extensions for multimodal LoRA tuning, including:
