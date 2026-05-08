@@ -1,22 +1,12 @@
-# ==========================ZJJ: 代码更新优化主要在这个py文件中==========================
 # coding=utf-8
 # Copyright 2020-present the HuggingFace Inc. team.
-#
 # Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
 #     http://www.apache.org/licenses/LICENSE-2.0
-#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
 # limitations under the License.
 
-# ============================================================
-# ZJJ_Version
-# ============================================================
 
 
 import contextlib
@@ -43,7 +33,6 @@ from deepspeed.utils import \
     safe_get_full_grad, safe_get_local_grad,\
     safe_set_full_fp32_param,safe_set_local_fp32_param
 
-# Integrations must be imported before ML frameworks:
 # isort: off
 from transformers.integrations import (
     get_reporting_integration_callbacks,
@@ -207,7 +196,6 @@ if TYPE_CHECKING:
 logger = logging.get_logger(__name__)
 
 
-# Name of the files used for checkpointing
 TRAINING_ARGS_NAME = "training_args.bin"
 TRAINER_STATE_NAME = "trainer_state.json"
 OPTIMIZER_NAME = "optimizer.pt"
@@ -220,12 +208,11 @@ FSDP_MODEL_NAME = "pytorch_model_fsdp"
 
 STEP_THRESHOLD=int(os.environ.get('STEP_THRESHOLD', 100))
 AB_PRESERVE_RATIO=float(os.environ.get('AB_PRESERVE_RATIO', 0.1))
-# 获取环境变量，默认值设为 0.5 (你 1.py 里的数值)
 HOG_LAMBDA = float(os.environ.get('HOG_LAMBDA', 0.5))
 CMR_LAMBDA=float(os.environ.get('CMR_LAMBDA', 1e-3))
 OMEGA=float(os.environ.get('OMEGA', 1.0))
 
-# Risk-aware rank mask configs (gradient-conflict driven)
+# 1) C1. Risk-aware Rank Pruning
 RISK_MASK_ENABLE = str(os.environ.get("RISK_MASK_ENABLE", "1")).lower() in ("1", "true", "yes", "y")
 RISK_UPDATE_INTERVAL = int(os.environ.get("RISK_UPDATE_INTERVAL", 20))
 RISK_EMA_BETA = float(os.environ.get("RISK_EMA_BETA", 0.9))
@@ -238,9 +225,6 @@ RISK_PATCH_RANK_MAX = int(os.environ.get("RISK_PATCH_RANK_MAX", 16))
 
 
 
-# 1. 补丁类：极小的 LoRA，专门用于修补残差
-
-# 1. 补丁类：极小的 LoRA，专门用于修补残差 (终极无痛版)
 class ResidualPatch(nn.Module):
     def __init__(self, in_features, out_features, rank=4, alpha=0.25, hog_lambda=0.5, omega=1.0, base_weight=None):
         super().__init__()
@@ -253,7 +237,6 @@ class ResidualPatch(nn.Module):
         nn.init.kaiming_uniform_(self.patch_A, a=math.sqrt(5))
         nn.init.zeros_(self.patch_B)
 
-        # === [终极优化] 拒绝囤积矩阵！只存对原权重的轻量级"引用"(占用0显存) ===
         self.base_weight = base_weight
 
     def forward(self, x, original_output):
@@ -265,37 +248,32 @@ class ResidualPatch(nn.Module):
         patch_out = (x @ p_A.T @ p_B.T) * self.scaling
         return original_output + patch_out.to(dtype)
 
-    # === [新增] 计算 Patch 自身的正则化损失 ===
     def get_reg_loss(self):
-        # === [终极优化] 即用即算，算完马上释放！===
         if self.base_weight is not None:
             with torch.no_grad():
                 hog_prior = compute_hog_prior(self.base_weight)
                 hog_min = hog_prior.min()
                 hog_max = hog_prior.max()
                 hog_norm = (hog_prior - hog_min) / (hog_max - hog_min + 1e-8)
-                del hog_prior # 阅后即焚
+                del hog_prior # 闃呭悗鍗崇剼
 
                 w_norm = torch.norm(self.base_weight.to(torch.float32), p=2).to(self.base_weight.dtype)
                 M_pre = self.base_weight / (w_norm + 1e-8)
                 S_mag = torch.abs((1 / torch.log(M_pre.abs() + 1e-15)))
-                del M_pre # 阅后即焚
+                del M_pre # 闃呭悗鍗崇剼
 
                 S_combined = S_mag + self.hog_lambda * hog_norm
-                del S_mag, hog_norm # 阅后即焚
+                del S_mag, hog_norm # 闃呭悗鍗崇剼
 
                 hog_mask = torch.tanh(self.omega * S_combined)
-                del S_combined # 阅后即焚
+                del S_combined # 闃呭悗鍗崇剼
 
-            # 算完 Mask 马上乘，乘完马上把 Mask 扔掉
             delta_W = (self.patch_B @ self.patch_A) * self.scaling
             loss = torch.norm(hog_mask * delta_W, p=2)
             del hog_mask
 
             return loss
         return 0.0
-    # [优化] 用于推理阶段的无痕合并
-    def merge_to_base(self, base_layer):
         if self.patch_A is not None and self.patch_B is not None:
             with torch.no_grad():
                 delta_W = (self.patch_B @ self.patch_A) * self.scaling
@@ -303,8 +281,7 @@ class ResidualPatch(nn.Module):
 
 
 
-# 2. HOG 计算函数：放在外面，供 comput_custom_reg 调用
-_SOBEL_CACHE = {} # 全局缓存
+_SOBEL_CACHE = {} # 鍏ㄥ眬缂撳瓨
 def compute_hog_prior(weight_tensor):
     if len(weight_tensor.shape) == 2:
         w_img = weight_tensor.unsqueeze(0).unsqueeze(0)
@@ -320,13 +297,11 @@ def compute_hog_prior(weight_tensor):
     grad_x = F.conv2d(w_img, sobel_x, padding=1)
     grad_y = F.conv2d(w_img, sobel_y, padding=1)
 
-    # 【注意看这里！是逗号不是加号！】
     magnitude = torch.hypot(grad_x, grad_y) + 1e-8
     return magnitude.squeeze()
 
 class LoRASculpt(LLaVATrainer):
 
-    # ... [放在 LoRASculpt 类内部] ...
 
     def _ensure_risk_state(self):
         if hasattr(self, "risk_masks"):
@@ -372,8 +347,6 @@ class LoRASculpt(LLaVATrainer):
 
             gA = A.grad.detach()
             gB = B.grad.detach()
-            # Proxy for text/mm conflict without extra forward:
-            # compare rank-wise gradient directions from A-row and B-col statistics.
             rank = gA.shape[0]
             a_norm = torch.norm(gA, dim=1) + eps
             b_norm = torch.norm(gB, dim=0) + eps
@@ -506,13 +479,12 @@ class LoRASculpt(LLaVATrainer):
 
     def mount_residual_patches(self, model, patch_rank=4):
         """
-        [综合优化] 定向挂载：直接狙击核心多模态对齐层
+        [缁煎悎浼樺寲] 瀹氬悜鎸傝浇锛氱洿鎺ョ嫏鍑绘牳蹇冨妯℃€佸榻愬眰
         """
-        logger.info("🚑 Mounting Patches on targeted bottleneck layers...")
+        logger.info("馃殤 Mounting Patches on targeted bottleneck layers...")
         target_layer_keywords = ["mm_projector", "v_proj", "q_proj"]
         patches, trainable_params = [], []
 
-        # 冻结所有基础参数
         for p in model.parameters():
             p.requires_grad = False
 
@@ -538,7 +510,7 @@ class LoRASculpt(LLaVATrainer):
                 module.register_forward_hook(hook_fn)
                 patches.append(patch)
                 trainable_params.extend(list(patch.parameters()))
-                logger.info(f"   ➕ Target Patch mounted on: {name}")
+                logger.info(f"   鉃?Target Patch mounted on: {name}")
 
         self.active_patches = patches
         return trainable_params
@@ -550,7 +522,8 @@ class LoRASculpt(LLaVATrainer):
         self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None
     ):
 
-        # [消融] 移除 self.AB_masks = {} 初始化，不再追踪任何稀疏掩码
+        self.AB_masks = {}
+
         if RISK_MASK_ENABLE:
             self._ensure_risk_state()
 
@@ -564,22 +537,15 @@ class LoRASculpt(LLaVATrainer):
                 (self.model_wrapped,) = release_memory(self.model_wrapped)
                 self.model_wrapped = self.model
 
-                # Check for DeepSpeed *after* the intial pass and modify the config
                 if self.is_deepspeed_enabled:
-                    # Temporarily unset `self.args.train_batch_size`
                     original_bs = self.args.per_device_train_batch_size
                     self.args.per_device_train_batch_size = self._train_batch_size // max(1, self.args.n_gpu)
                     self.propagate_args_to_deepspeed(True)
                     self.args.per_device_train_batch_size = original_bs
             self.state.train_batch_size = self._train_batch_size
         logger.debug(f"Currently training with a batch size of: {self._train_batch_size}")
-        # Data loader and number of training steps
         train_dataloader = self.get_train_dataloader()
 
-        # Setting up training control variables:
-        # number of training epochs: num_train_epochs
-        # number of training steps per epoch: num_update_steps_per_epoch
-        # total number of training steps to execute: max_steps
         total_train_batch_size = self._train_batch_size * args.gradient_accumulation_steps * args.world_size
 
         len_dataloader = None
@@ -594,8 +560,6 @@ class LoRASculpt(LLaVATrainer):
                 num_train_epochs = args.max_steps // num_update_steps_per_epoch + int(
                     args.max_steps % num_update_steps_per_epoch > 0
                 )
-                # May be slightly incorrect if the last batch in the training dataloader has a smaller size but it's
-                # the best we can do.
                 num_train_samples = args.max_steps * total_train_batch_size
                 if args.include_tokens_per_second:
                     num_train_tokens = (
@@ -609,7 +573,6 @@ class LoRASculpt(LLaVATrainer):
                     num_train_tokens = self.num_tokens(train_dataloader) * args.num_train_epochs
         elif args.max_steps > 0:  # Rely on max_steps when dataloader does not have a working size
             max_steps = args.max_steps
-            # Setting a very large number of epochs so we go as many times as necessary over the iterator.
             num_train_epochs = sys.maxsize
             num_update_steps_per_epoch = max_steps
             num_examples = total_train_batch_size * args.max_steps
@@ -624,8 +587,6 @@ class LoRASculpt(LLaVATrainer):
 
         if DebugOption.UNDERFLOW_OVERFLOW in self.args.debug:
             if self.args.n_gpu > 1:
-                # nn.DataParallel(model) replicates the model, creating new variables and module
-                # references registered here no longer work on other gpus, breaking the module
                 raise ValueError(
                     "Currently --debug underflow_overflow is not supported under DP. Please use DDP"
                     " (torchrun or torch.distributed.launch (deprecated))."
@@ -635,7 +596,6 @@ class LoRASculpt(LLaVATrainer):
 
         delay_optimizer_creation = is_sagemaker_mp_enabled() or self.is_fsdp_xla_enabled or self.is_fsdp_enabled
 
-        # We need to reset the scheduler, as its parameters may be different on subsequent calls
         if self._created_lr_scheduler:
             self.lr_scheduler = None
             self._created_lr_scheduler = False
@@ -650,7 +610,6 @@ class LoRASculpt(LLaVATrainer):
         self.state.is_hyper_param_search = trial is not None
         self.state.train_batch_size = self._train_batch_size
 
-        # Compute absolute values for logging, eval, and save if given as ratio
         if args.logging_steps is not None:
             if args.logging_steps < 1:
                 self.state.logging_steps = math.ceil(max_steps * args.logging_steps)
@@ -667,7 +626,6 @@ class LoRASculpt(LLaVATrainer):
             else:
                 self.state.save_steps = args.save_steps
 
-        # Activate gradient checkpointing if needed
         if args.gradient_checkpointing:
             if args.gradient_checkpointing_kwargs is None:
                 gradient_checkpointing_kwargs = {'use_reentrant':False}
@@ -680,15 +638,11 @@ class LoRASculpt(LLaVATrainer):
 
         model = self._wrap_model(self.model_wrapped)
 
-        # as the model is wrapped, don't use `accelerator.prepare`
-        # this is for unhandled cases such as
-        # FSDP-XLA, SageMaker MP/DP, DataParallel, IPEX
         use_accelerator_prepare = True if model is self.model else False
 
         if delay_optimizer_creation:
             self.create_optimizer_and_scheduler(num_training_steps=max_steps)
 
-        # prepare using `accelerator` prepare
         if use_accelerator_prepare:
             self.model.train()
             if hasattr(self.lr_scheduler, "step"):
@@ -697,7 +651,6 @@ class LoRASculpt(LLaVATrainer):
                 else:
                     model, self.optimizer = self.accelerator.prepare(self.model, self.optimizer)
             else:
-                # to handle cases wherein we pass "DummyScheduler" such as when it is specified in DeepSpeed config.
                 model, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
                     self.model, self.optimizer, self.lr_scheduler
                 )
@@ -705,30 +658,21 @@ class LoRASculpt(LLaVATrainer):
         if self.is_fsdp_enabled:
             self.model = self.model_wrapped = model
 
-        # for the rest of this function `model` is the outside model, whether it was wrapped or not
         if model is not self.model:
             self.model_wrapped = model
 
-        # backward compatibility
         if self.is_deepspeed_enabled:
             self.deepspeed = self.model_wrapped
 
-        # ckpt loading
         if resume_from_checkpoint is not None:
             if self.is_deepspeed_enabled:
                 deepspeed_load_checkpoint(self.model_wrapped, resume_from_checkpoint)
             elif is_sagemaker_mp_enabled() or self.is_fsdp_enabled:
                 self._load_from_checkpoint(resume_from_checkpoint, self.model_wrapped)
 
-        # Check if saved optimizer or scheduler states exist
         self._load_optimizer_and_scheduler(resume_from_checkpoint)
 
-        # important: at this point:
-        # self.model         is the Transformers Model
-        # self.model_wrapped is DDP(Transformers Model), Deepspeed(Transformers Model),
-        # FSDP(Transformers Model), Dynamo Optimized Module(Transformers Model) etc.
 
-        # Train!
         logger.info("***** Running training *****")
         logger.info(f"  Num examples = {num_examples:,}")
         logger.info(f"  Num Epochs = {num_train_epochs:,}")
@@ -746,7 +690,6 @@ class LoRASculpt(LLaVATrainer):
         steps_trained_in_current_epoch = 0
         steps_trained_progress_bar = None
 
-        # Check if continuing training from a checkpoint
         if resume_from_checkpoint is not None and os.path.isfile(
             os.path.join(resume_from_checkpoint, TRAINER_STATE_NAME)
         ):
@@ -767,37 +710,29 @@ class LoRASculpt(LLaVATrainer):
                     f" {steps_trained_in_current_epoch} batches in the first epoch."
                 )
 
-        # Update the references
         self.callback_handler.model = self.model
         self.callback_handler.optimizer = self.optimizer
         self.callback_handler.lr_scheduler = self.lr_scheduler
         self.callback_handler.train_dataloader = train_dataloader
         if self.hp_name is not None and self._trial is not None:
-            # use self._trial because the SigOpt/Optuna hpo only call `_hp_search_setup(trial)` instead of passing trial
-            # parameter to Train when using DDP.
             self.state.trial_name = self.hp_name(self._trial)
         if trial is not None:
             assignments = trial.assignments if self.hp_search_backend == HPSearchBackend.SIGOPT else trial
             self.state.trial_params = hp_params(assignments)
         else:
             self.state.trial_params = None
-        # This should be the same if the state has been saved but in case the training arguments changed, it's safer
-        # to set this after the load.
         self.state.max_steps = max_steps
         self.state.num_train_epochs = num_train_epochs
         self.state.is_local_process_zero = self.is_local_process_zero()
         self.state.is_world_process_zero = self.is_world_process_zero()
 
-        # tr_loss is a tensor to avoid synchronization of TPUs through .item()
         tr_loss = torch.tensor(0.0).to(args.device)
-        # _total_loss_scalar is updated everytime .item() has to be called on tr_loss and stores the sum of all losses
         self._total_loss_scalar = 0.0
         self._globalstep_last_logged = self.state.global_step
         model.zero_grad()
 
         self.control = self.callback_handler.on_train_begin(args, self.state, self.control)
 
-        # Skip the first epochs_trained epochs to get the random state of the dataloader at the right point.
         if not args.ignore_data_skip:
             for epoch in range(epochs_trained):
                 sampler = get_dataloader_sampler(train_dataloader)
@@ -806,12 +741,9 @@ class LoRASculpt(LLaVATrainer):
                     sampler_kinds.append(SeedableRandomSampler)
                 is_random_sampler = isinstance(sampler, tuple(sampler_kinds))
                 if not is_random_sampler:
-                    # We just need to begin an iteration to create the randomization of the sampler.
                     for _ in train_dataloader:
                         break
                 else:
-                    # Otherwise we need to call the whooooole sampler cause there is some random operation added
-                    # AT THE VERY END!
                     sampler = sampler if sampler is not None else []
                     _ = list(sampler)
 
@@ -821,7 +753,6 @@ class LoRASculpt(LLaVATrainer):
             if hasattr(epoch_iterator, "set_epoch"):
                 epoch_iterator.set_epoch(epoch)
 
-            # Reset the past mems state at the beginning of each epoch if necessary.
             if args.past_index >= 0:
                 self._past = None
 
@@ -849,9 +780,39 @@ class LoRASculpt(LLaVATrainer):
 
             for step, inputs in enumerate(epoch_iterator):
 
-                # [消融] 移除 STEP_THRESHOLD 时刻的 Top-K 幅度掩码创建块
-                # [消融] 移除 restore_lora_param 函数定义及每步调用循环
-                # 所有 LoRA 参数在整个训练过程中自由更新，不施加稀疏约束
+                if self.state.global_step == STEP_THRESHOLD:
+                    for name, param in model.named_parameters():
+                        if param.requires_grad and 'lora' in name:
+                            lora_param = (safe_get_full_fp32_param(param)).clone()
+                            abs_lora_param = torch.abs(lora_param)
+                            flat_abs_lora_param = abs_lora_param.flatten()
+                            k = int(flat_abs_lora_param.numel() * AB_PRESERVE_RATIO)
+                            _, top_indices = torch.topk(flat_abs_lora_param, k, largest=True)
+
+                            coef_matrix = torch.zeros_like(flat_abs_lora_param)
+                            coef_matrix[top_indices] = 1
+                            coef_matrix = coef_matrix.reshape(lora_param.shape).to(lora_param.device)
+
+                            scaled_lora_param = coef_matrix * lora_param
+                            safe_set_full_fp32_param(param, scaled_lora_param)
+
+                            self.AB_masks[name] = top_indices
+
+                def restore_lora_param(param_name, param):
+                    if param_name in self.AB_masks:
+                        lora_param = (safe_get_full_fp32_param(param)).clone()
+                        flat_lora_param = lora_param.flatten()
+
+                        top_indices = self.AB_masks[param_name]
+                        restored_tensor = torch.zeros_like(flat_lora_param, device=param.device)
+                        restored_tensor[top_indices] = flat_lora_param[top_indices]
+
+                        restored_tensor = restored_tensor.reshape(param.shape)
+                        safe_set_full_fp32_param(param, restored_tensor)
+
+                for name, param in model.named_parameters():
+                    if param.requires_grad and 'lora' in name:
+                        restore_lora_param(name, param)
 
                 total_batched_samples += 1
 
@@ -869,7 +830,6 @@ class LoRASculpt(LLaVATrainer):
                     self._load_rng_state(resume_from_checkpoint)
                     rng_to_sync = False
 
-                # Skip past any already trained steps if resuming training
                 if steps_trained_in_current_epoch > 0:
                     steps_trained_in_current_epoch -= 1
                     if steps_trained_progress_bar is not None:
@@ -909,20 +869,15 @@ class LoRASculpt(LLaVATrainer):
                 if (
                     total_batched_samples % args.gradient_accumulation_steps == 0
                     or
-                    # last step in epoch but step is always smaller than gradient_accumulation_steps
                     is_last_step_and_steps_less_than_grad_acc
                 ):  # the `or` condition of `is_last_step_and_steps_less_than_grad_acc` is not covered
-                    # in accelerate. So, explicitly enable sync gradients to True in that case.
                     if is_last_step_and_steps_less_than_grad_acc:
                         self.accelerator.gradient_state._set_sync_gradients(True)
 
-                    # Gradient clipping
                     if args.max_grad_norm is not None and args.max_grad_norm > 0:
-                        # deepspeed does its own clipping
                         if is_sagemaker_mp_enabled() and args.fp16:
                             self.optimizer.clip_master_grads(args.max_grad_norm)
                         elif self.use_apex:
-                            # Revert to normal clipping otherwise, handling Apex or full precision
                             nn.utils.clip_grad_norm_(
                                 amp.master_params(self.optimizer),
                                 args.max_grad_norm,
@@ -942,7 +897,6 @@ class LoRASculpt(LLaVATrainer):
 
                     optimizer_was_run = not self.accelerator.optimizer_step_was_skipped
                     if optimizer_was_run:
-                        # Delay optimizer scheduling until metrics are generated
                         if not isinstance(self.lr_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                             self.lr_scheduler.step()
 
@@ -974,7 +928,6 @@ class LoRASculpt(LLaVATrainer):
 
             if DebugOption.TPU_METRICS_DEBUG in self.args.debug:
                 if is_torch_tpu_available():
-                    # tpu-comment: Logging debug metrics for PyTorch/XLA (compile, execute times, ops, etc.)
                     xm.master_print(met.metrics_report())
                 else:
                     logger.warning(
@@ -985,12 +938,10 @@ class LoRASculpt(LLaVATrainer):
                 break
 
         if args.past_index and hasattr(self, "_past"):
-            # Clean the state at the end of training
             delattr(self, "_past")
 
         logger.info("\n\nTraining completed. Do not forget to share your model on huggingface.co/models =)\n\n")
         if args.load_best_model_at_end and self.state.best_model_checkpoint is not None:
-            # Wait for everyone to get here so we are sure the model has been saved by process 0.
             if is_torch_tpu_available():
                 xm.rendezvous("load_best_model_at_end")
             elif args.parallel_mode == ParallelMode.DISTRIBUTED:
@@ -1000,7 +951,6 @@ class LoRASculpt(LLaVATrainer):
 
             self._load_best_model()
 
-        # add remaining tr_loss
         self._total_loss_scalar += tr_loss.item()
         train_loss = self._total_loss_scalar / self.state.global_step
 
@@ -1033,7 +983,6 @@ class LoRASculpt(LLaVATrainer):
             except Exception as e:
                 logger.warning(f"Failed to save risk mask stats: {e}")
 
-        # Delete the last checkpoint when save_total_limit=1 if it's different from the best checkpoint and process allowed to save.
         if self.args.should_save and self.state.best_model_checkpoint is not None and self.args.save_total_limit == 1:
             for checkpoint in checkpoints_sorted:
                 if not os.path.samefile(checkpoint, self.state.best_model_checkpoint):
@@ -1042,23 +991,11 @@ class LoRASculpt(LLaVATrainer):
 
         self.control = self.callback_handler.on_train_end(args, self.state, self.control)
 
-        # Wait for the checkpoint to be uploaded.
         self._finish_current_push()
 
-        # After training we make sure to retrieve back the original forward pass method
-        # for the embedding layer by removing the forward post hook.
         if self.neftune_noise_alpha is not None:
             self._deactivate_neftune(self.model)
-        # ============================================================
-        # [新增] 第三步：自动触发 LoRA of LoRA 补丁训练
-        # ============================================================
-        # ============================================================
-        # [改进一] 第三步：按 Epoch 比例自动触发 LoRA of LoRA 补丁训练
-        # ============================================================
-        # ============================================================
-        # ============================================================
-        # [新增] 第三步：自动触发 LoRA of LoRA 补丁训练
-        # ============================================================
+        # 3) C3. Residual Patch Refinement
         try:
             p_rank = int(os.environ.get('PATCH_RANK', 8))
             patch_params = self.mount_residual_patches(self.model, patch_rank=p_rank)
@@ -1066,17 +1003,12 @@ class LoRASculpt(LLaVATrainer):
             if patch_params:
                 grad_acc_steps = self.args.gradient_accumulation_steps
 
-                # 动态读取 epoch，计算步数
-                patch_epochs = float(os.environ.get('PATCH_TRAIN_EPOCHS', 0.5))
-                # 确保这里拿到的是真实的 dataloader 长度
                 steps_per_epoch = len(train_dataloader) if len_dataloader is not None else 2500
                 refine_steps = int((steps_per_epoch * patch_epochs) / grad_acc_steps)
                 refine_steps = max(refine_steps, 1)
 
-                logger.info(f"🚀 Starting Targeted Refinement for {patch_epochs} epochs ({refine_steps} steps)...")
+                logger.info(f"馃殌 Starting Targeted Refinement for {patch_epochs} epochs ({refine_steps} steps)...")
 
-                # 【关键修复】：绝对不把主 LoRA 放进原生优化器，避免 DeepSpeed 冲突！
-                # 只让 Patch 自己独立、快速地学习残差
                 patch_optimizer = torch.optim.AdamW([
                     {'params': patch_params, 'lr': 5e-4}
                 ])
@@ -1098,11 +1030,8 @@ class LoRASculpt(LLaVATrainer):
 
                     inputs = self._prepare_inputs(inputs)
 
-                    # 避免使用 compute_loss_context_manager，防止深层反向传播冲突
-                    outputs = self.model(**inputs)
                     loss = outputs["loss"]
 
-                    # 加入 Patch 的独立正则化约束
                     if hasattr(self, 'active_patches'):
                         patch_reg_loss = sum(p.get_reg_loss() for p in self.active_patches)
                         loss += CMR_LAMBDA * patch_reg_loss
@@ -1118,10 +1047,7 @@ class LoRASculpt(LLaVATrainer):
                     if step % 50 == 0 or step == refine_steps - 1:
                          logger.info(f"   [Patch Refine] Step {step}/{refine_steps}: Loss {(loss * grad_acc_steps).item():.4f} | LR: {scheduler.get_last_lr()[0]:.6f}")
 
-                # ====================================================================
-                # 【终极优化点】使用安全解包机制进行 SVD 吸收，彻底规避 4 和 64 碰撞！
-                # ====================================================================
-                logger.info("🔄 SVD Merging learned Patches into main LoRA weights before saving...")
+                logger.info("馃攧 SVD Merging learned Patches into main LoRA weights before saving...")
 
                 main_lora_alpha = float(os.environ.get('LORA_ALPHA', 64.0))
                 main_lora_rank = float(os.environ.get('LORA_RANK', 64.0))
@@ -1132,12 +1058,10 @@ class LoRASculpt(LLaVATrainer):
                         if hasattr(module, '_forward_hooks') and len(module._forward_hooks) > 0:
                             patch = list(module._forward_hooks.values())[0]
                             if isinstance(patch, ResidualPatch):
-                                # 寻找对应层的 lora_A 和 lora_B
                                 lora_A_name = name + ".lora_A.default.weight"
                                 lora_B_name = name + ".lora_B.default.weight"
 
                                 params_dict = dict(self.model.named_parameters())
-                                # 兼容不同版本的 PEFT 命名
                                 if lora_A_name not in params_dict:
                                     lora_A_name = name + ".lora_A.weight"
                                     lora_B_name = name + ".lora_B.weight"
@@ -1146,42 +1070,33 @@ class LoRASculpt(LLaVATrainer):
                                     L_A = params_dict[lora_A_name]
                                     L_B = params_dict[lora_B_name]
 
-                                    # 【核心修复】：使用 .data 抽取纯净张量进行矩阵运算，切断与 DeepSpeed 环境的隐式联系
-                                    clean_LA = L_A.data.float()
                                     clean_LB = L_B.data.float()
                                     clean_PA = patch.patch_A.data.float()
                                     clean_PB = patch.patch_B.data.float()
 
-                                    # 计算合并矩阵
                                     delta_W = (clean_LB @ clean_LA) * main_scaling + (clean_PB @ clean_PA) * patch.scaling
                                     target_M = delta_W / main_scaling
 
-                                    # SVD 分解
                                     U, S, Vh = torch.linalg.svd(target_M, full_matrices=False)
 
-                                    # 截断回主 rank 64
                                     rank = L_A.shape[0]
                                     U_trunc = U[:, :rank]
                                     S_trunc = S[:rank]
                                     Vh_trunc = Vh[:rank, :]
 
-                                    # 生成纯净的新矩阵
                                     new_L_B = U_trunc * torch.sqrt(S_trunc)
                                     new_L_A = torch.sqrt(S_trunc).unsqueeze(1) * Vh_trunc
 
-                                    # 强制安全覆写
                                     L_B.data.copy_(new_L_B.to(L_B.dtype))
                                     L_A.data.copy_(new_L_A.to(L_A.dtype))
 
-                                    # 清除 Hook，确保保存环境干净
                                     module._forward_hooks.clear()
 
                 self.save_model(output_dir=os.path.join(run_dir, "refined_final"))
-                logger.info("✅ Targeted Refinement SVD Merged and Saved.")
+                logger.info("鉁?Targeted Refinement SVD Merged and Saved.")
 
         except Exception as e:
-            logger.warning(f"⚠️ Refinement skipped: {e}")
-        # ============================================================
+            logger.warning(f"鈿狅笍 Refinement skipped: {e}")
 
         return TrainOutput(self.state.global_step, train_loss, metrics)
 
@@ -1226,26 +1141,21 @@ class LoRASculpt(LLaVATrainer):
 
 
 
+    # 3) C2. Structure-aware Regularization
     def comput_custom_reg(self, model, reg_lambda=0.1):
         reg_loss = 0.0
         param_count = 0
 
-        # ==================== 1. 收集参数 ====================
         dict_A, dict_B, dict_PT = {}, {}, {}
         for name, param in model.named_parameters():
-            # 筛选 Lora A
             if "lora_A" in name and any(proj in name for proj in ("q_proj", "k_proj", "v_proj", "mm_projector")):
                 dict_A[name] = param
-            # 筛选 Lora B
             elif "lora_B" in name and any(proj in name for proj in ("q_proj", "k_proj", "v_proj", "mm_projector")):
                 dict_B[name] = param
-            # 筛选 Base Layer (原始权重)
             elif "base_layer" in name and any(proj in name for proj in ("q_proj", "k_proj", "v_proj", "mm_projector")):
                 dict_PT[name] = param
 
-        # ==================== 2. 计算正则化 ====================
         for lora_A_name, A in dict_A.items():
-            # 匹配名称
             lora_B_name = lora_A_name.replace("lora_A", "lora_B")
             if "default" in lora_A_name:
                 PT_name = lora_A_name.replace("lora_A.default", "base_layer")
@@ -1259,46 +1169,33 @@ class LoRASculpt(LLaVATrainer):
             W = dict_PT[PT_name]
 
             with torch.no_grad():
-                # ====== 【完美契合：通过环境变量直接获取主 LoRA 的 scaling】 ======
                 main_lora_alpha = float(os.environ.get('LORA_ALPHA', 64.0))
                 main_lora_rank = float(os.environ.get('LORA_RANK', 64.0))
                 scaling = main_lora_alpha / main_lora_rank
-                # ================================================================
 
                 delta_W = (B @ A) * scaling
-
-                # 动态有效权重
                 W_effective = W + delta_W.to(W.dtype)
-
-                # 对加上了 LoRA 的有效权重提取 HOG 边缘！
                 hog_prior = compute_hog_prior(W_effective)
-
-                # 这样 M (Mask) 就会随着训练动态演变，不仅保护原模型的边缘，
-                # 还会保护 LoRA 已经学出来的关键特征边缘，防止灾难性遗忘！
-
-                # C. Min-Max 归一化
                 hog_min = hog_prior.min()
+                w_norm = torch.norm(W.to(torch.float32), p=2).to(W.dtype)
+
+
+
+
                 hog_max = hog_prior.max()
                 hog_norm = (hog_prior - hog_min) / (hog_max - hog_min + 1e-8)
-                del hog_prior # 【关键】阅后即焚，立刻释放内存！
-
-                # D. 计算原始的幅度 Mask
-                # 为了防除零溢出，算 norm 时局部转一下，算出一个标量，不占大显存
-                w_norm = torch.norm(W.to(torch.float32), p=2).to(W.dtype)
+                del hog_prior 
                 M_pre = W / (w_norm + 1e-8)
 
                 S_mag = torch.abs((1 / torch.log(M_pre.abs() + 1e-15)))
-                del M_pre # 【关键】阅后即焚！
+                del M_pre 
 
-                # E. 融合两种先验
                 S_combined = S_mag + HOG_LAMBDA * hog_norm
-                del S_mag, hog_norm # 【关键】阅后即焚！
+                del S_mag, hog_norm 
 
-                # 生成最终 Mask
                 M = torch.tanh(OMEGA * S_combined)
-                del S_combined # 【关键】阅后即焚！
+                del S_combined 
 
-            # F. 计算损失（仅对未屏蔽秩）
             if RISK_MASK_ENABLE and getattr(self, "risk_masks", None):
                 layer_key = self._base_layer_key_from_lora_name(lora_A_name)
                 rank_mask = self.risk_masks.get(layer_key, None)
@@ -1330,3 +1227,4 @@ class LoRASculpt(LLaVATrainer):
         loss += reg_loss
 
         return (loss, outputs) if return_outputs else loss
+
