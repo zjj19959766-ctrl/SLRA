@@ -6,9 +6,8 @@ Official implementation base of **LoRASculpt** with our extended training pipeli
 
 This repository contains our practical training/evaluation workflow and trainer-side extensions for multimodal LoRA tuning, including:
 
-1. **C1. Risk-aware Rank Pruning**
-2. **C2. Structure-aware Regularization**
-3. **C3. Residual Patch Refinement**
+1. **C1. Gradient-Sensitive Subspace Selection (GSS)**
+2. **C2. Magnitude-aware Progressive Forging (GSS)**
 
 ---
 
